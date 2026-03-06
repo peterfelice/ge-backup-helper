@@ -182,48 +182,86 @@ def confirm_action(config, command, skip_confirmation=False):
         print("\nOperation cancelled by user.")
         sys.exit(0)
 
+def get_agents_list(config, token, debug=False, silent=True, user_only=True):
+    """Fetches the list of agents and optionally filters for user-created agents."""
+    api_url = f"{config['BASE_URL']}/agents"
+    api_success, response_body = run_curl("GET", api_url, token, debug=debug, silent=silent)
+    
+    if not api_success:
+        return None, "Failed to retrieve agent list."
+
+    try:
+        data = json.loads(response_body)
+        agents = data.get("agents", [])
+        
+        if user_only:
+            agents = [a for a in agents if "lowCodeAgentDefinition" in a]
+            
+        return agents, None
+    except json.JSONDecodeError:
+        return None, "Failed to parse API response as JSON."
+
+def download_agent(config, token, agent_id, destination, is_resource_name=False, debug=False, silent=False):
+    """Downloads an agent's configuration to a specified file."""
+    if is_resource_name:
+        api_url = f"https://discoveryengine.googleapis.com/{config['API_VERSION']}/{agent_id}"
+    else:
+        api_url = f"{config['BASE_URL']}/agents/{agent_id}"
+        
+    return run_curl("GET", api_url, token, output_file=destination, debug=debug, silent=silent)
+
+def deploy_agent(config, token, agent_id, debug=False, silent=False):
+    """Deploys an agent, taking it out of draft mode."""
+    deploy_url = f"{config['BASE_URL']}/agents/{agent_id}:deploy"
+    return run_curl("POST", deploy_url, token, debug=debug, silent=silent)
+
+def update_agent(config, token, agent_id, file, debug=False, silent=False):
+    """Updates an existing agent using a JSON configuration file (PATCH)."""
+    update_url = f"{config['BASE_URL']}/agents/{agent_id}"
+    return run_curl("PATCH", update_url, token, data_file=file, debug=debug, silent=silent)
+
+def create_agent(config, token, agent_id, file, debug=False, silent=False):
+    """Creates a new agent from a JSON file (POST)."""
+    if agent_id:
+        create_url = f"{config['BASE_URL']}/agents?agentId={agent_id}"
+    else:
+        create_url = f"{config['BASE_URL']}/agents"
+    return run_curl("POST", create_url, token, data_file=file, debug=debug, silent=silent)
+
 def handle_get(args, config, token):
     """Retrieves an agent's full configuration and saves it to a file."""
-    api_url = f"{config['BASE_URL']}/agents/{args.agent_id}"
     destination = args.output or f"agent_{args.agent_id}.json"
     
     print(f"Retrieving agent configuration for: {args.agent_id}...")
-    api_success, _ = run_curl("GET", api_url, token, output_file=destination, debug=args.debug)
+    api_success, _ = download_agent(config, token, args.agent_id, destination, debug=args.debug)
     
     if api_success:
         print(f"Success: Agent configuration saved to {destination}")
 
 def handle_save(args, config, token):
     """Updates an existing agent using a JSON configuration file (PATCH)."""
-    api_url = f"{config['BASE_URL']}/agents/{args.agent_id}"
-    
     if not os.path.exists(args.file):
         print(f"Error: Configuration file '{args.file}' not found.", file=sys.stderr)
         return
 
     print(f"Updating agent {args.agent_id} using {args.file}...")
-    api_success, _ = run_curl("PATCH", api_url, token, data_file=args.file, debug=args.debug)
+    api_success, _ = update_agent(config, token, args.agent_id, args.file, debug=args.debug)
     
     if api_success:
         print(f"Success: Agent {args.agent_id} updated.")
 
 def handle_create(args, config, token):
     """Creates a new agent. If agent_id is provided, uses it; otherwise, ID is auto-generated."""
-    base_url = f"{config['BASE_URL']}/agents"
-    
-    if args.agent_id:
-        # To specify a custom ID, pass it as a query parameter
-        api_url = f"{base_url}?agentId={args.agent_id}"
-        print(f"Creating new agent with ID '{args.agent_id}' from {args.file}...")
-    else:
-        api_url = base_url
-        print(f"Creating new agent with auto-generated ID from {args.file}...")
-    
     if not os.path.exists(args.file):
         print(f"Error: Configuration file '{args.file}' not found.", file=sys.stderr)
         return
 
-    api_success, response_body = run_curl("POST", api_url, token, data_file=args.file, debug=args.debug)
+    if args.agent_id:
+        print(f"Creating new agent with ID '{args.agent_id}' from {args.file}...")
+    else:
+        print(f"Creating new agent with auto-generated ID from {args.file}...")
+    
+    api_success, response_body = create_agent(config, token, args.agent_id, args.file, debug=args.debug)
     
     if api_success:
         print("Success: Agent created.")
@@ -240,80 +278,50 @@ def handle_create(args, config, token):
         # Check for auto-deploy
         if getattr(args, "deploy", False) and created_id:
             print(f"Auto-deploying agent {created_id}...")
-            deploy_url = f"{config['BASE_URL']}/agents/{created_id}:deploy"
-            run_curl("POST", deploy_url, token, debug=args.debug)
+            deploy_agent(config, token, created_id, debug=args.debug)
 
 def handle_list(args, config, token):
     """Lists agents associated with the configured assistant."""
-    api_url = f"{config['BASE_URL']}/agents"
     print("Listing agents...")
     
-    api_success, response_body = run_curl("GET", api_url, token, debug=args.debug, silent=True)
+    show_all = getattr(args, "all", False)
+    agents, error = get_agents_list(config, token, debug=args.debug, silent=True, user_only=not show_all)
     
-    if not api_success:
-        print("Error: Could not retrieve agent list.", file=sys.stderr)
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
         return
 
-    if not response_body.strip():
-        print("No agents found.")
+    if not agents:
+        msg = "No agents found." if show_all else "No user-created agents found. Use --all to see system agents."
+        print(msg)
         return
 
     if args.verbose:
-        print(response_body)
-    else:
-        try:
-            data = json.loads(response_body)
-            agents = data.get("agents", [])
-            
-            if not agents:
-                print("No agents found.")
-                return
-            
-            # Filter: By default, show only user-created agents (lowCodeAgentDefinition)
-            show_all = getattr(args, "all", False)
-            if not show_all:
-                user_agents = [a for a in agents if "lowCodeAgentDefinition" in a]
-                if not user_agents:
-                    print("No user-created agents found. Use --all to see system agents.")
-                    return
-                agents = user_agents
-            
-            # Print a clean, formatted table
-            print(f"\n{'AGENT ID':<40} {'DISPLAY NAME'}")
-            print("-" * 75)
-            for agent in agents:
-                # Name format: 'projects/.../locations/.../agents/ID'
-                resource_name = agent.get("name", "")
-                agent_id = resource_name.split("/")[-1] if "/" in resource_name else "N/A"
-                display_name = agent.get("displayName", "Unnamed")
-                print(f"{agent_id:<40} {display_name}")
-            print("-" * 75 + "\n")
-            
-        except json.JSONDecodeError:
-            print("Error: Failed to parse API response as JSON. Use --verbose for raw output.", file=sys.stderr)
+        print(json.dumps({"agents": agents}, indent=2))
+        return
+
+    # Print a clean, formatted table
+    print(f"\n{'AGENT ID':<40} {'DISPLAY NAME'}")
+    print("-" * 75)
+    for agent in agents:
+        # Name format: 'projects/.../locations/.../agents/ID'
+        resource_name = agent.get("name", "")
+        agent_id = resource_name.split("/")[-1] if "/" in resource_name else "N/A"
+        display_name = agent.get("displayName", "Unnamed")
+        print(f"{agent_id:<40} {display_name}")
+    print("-" * 75 + "\n")
 
 def handle_backup_all(args, config, token):
     """Downloads all user-created agents into a timestamped directory."""
-    api_url = f"{config['BASE_URL']}/agents"
     print("Fetching agent list for backup...")
     
-    api_success, response_body = run_curl("GET", api_url, token, debug=args.debug, silent=True)
+    agents, error = get_agents_list(config, token, debug=args.debug, silent=True, user_only=True)
     
-    if not api_success:
-        print("Error: Failed to retrieve agent list.", file=sys.stderr)
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
         return
 
-    try:
-        data = json.loads(response_body)
-        agents = data.get("agents", [])
-    except json.JSONDecodeError:
-        print("Error: Failed to parse agent list JSON.", file=sys.stderr)
-        return
-
-    # Only backup user-created agents
-    user_agents = [a for a in agents if "lowCodeAgentDefinition" in a]
-    
-    if not user_agents:
+    if not agents:
         print("No user-created agents found to backup.")
         return
 
@@ -325,10 +333,10 @@ def handle_backup_all(args, config, token):
     os.makedirs(backup_dir, exist_ok=True)
     print(f"Created backup directory: {backup_dir}")
 
-    count_backups: int = 0
-    errors: list[str] = []
+    count_backups = 0
+    errors = []
 
-    for agent in user_agents:
+    for agent in agents:
         resource_name = agent.get("name", "")
         agent_id = resource_name.split("/")[-1] if "/" in resource_name else "Unknown"
         display_name = agent.get("displayName", "Unnamed").replace(" ", "_").replace("/", "-")
@@ -339,13 +347,10 @@ def handle_backup_all(args, config, token):
         
         print(f"  Backing up: {agent_id} ({agent.get('displayName', 'N/A')})...")
         
-        # Get full individual agent config
-        # resource_name is already the partial path 'projects/.../agents/ID'
-        agent_url = f"https://discoveryengine.googleapis.com/{config['API_VERSION']}/{resource_name}"
-        ok, _ = run_curl("GET", agent_url, token, output_file=filepath, debug=args.debug, silent=True)
+        ok, _ = download_agent(config, token, resource_name, filepath, is_resource_name=True, debug=args.debug, silent=True)
         
         if ok:
-            count_backups = count_backups + 1
+            count_backups += 1
         else:
             errors.append(f"Agent {agent_id} ({agent.get('displayName', 'N/A')})")
 
@@ -373,8 +378,8 @@ def handle_restore_all(args, config, token):
 
     print(f"Found {len(json_files)} potential agent backups. Starting restore...")
     
-    count_restores: int = 0
-    errors: list[str] = []
+    count_restores = 0
+    errors = []
 
     for filename in json_files:
         filepath = os.path.join(args.directory, filename)
@@ -385,25 +390,21 @@ def handle_restore_all(args, config, token):
         print(f"Restoring: {agent_id}...")
         
         # 1. Attempt to update existing agent (PATCH)
-        update_url = f"{config['BASE_URL']}/agents/{agent_id}"
-        api_success, response_body = run_curl("PATCH", update_url, token, data_file=filepath, debug=args.debug, silent=True)
+        api_success, response_body = update_agent(config, token, agent_id, filepath, debug=args.debug, silent=True)
         
         # 2. If PATCH fails and --create is set, attempt to create new (POST)
         if not api_success and getattr(args, "create", False):
             print(f"  Agent {agent_id} not found, attempting recreation...")
-            # Query param agentId is required to set the specific ID on creation
-            create_url = f"{config['BASE_URL']}/agents?agentId={agent_id}"
-            api_success, response_body = run_curl("POST", create_url, token, data_file=filepath, debug=args.debug, silent=True)
+            api_success, response_body = create_agent(config, token, agent_id, filepath, debug=args.debug, silent=True)
 
         if api_success:
-            count_restores = count_restores + 1
+            count_restores += 1
             print(f"  Successfully restored {agent_id}")
             
             # Auto-deploy if requested
             if getattr(args, "deploy", False):
                 print(f"  Deploying {agent_id}...")
-                deploy_url = f"{config['BASE_URL']}/agents/{agent_id}:deploy"
-                run_curl("POST", deploy_url, token, debug=args.debug, silent=True)
+                deploy_agent(config, token, agent_id, debug=args.debug, silent=True)
         else:
             errors.append(f"{agent_id} from {filename} (Error: {response_body.strip()})")
 
@@ -416,10 +417,8 @@ def handle_restore_all(args, config, token):
 
 def handle_deploy(args, config, token):
     """Deploys (publishes) an agent, making it live and taking it out of draft mode."""
-    api_url = f"{config['BASE_URL']}/agents/{args.agent_id}:deploy"
     print(f"Deploying agent {args.agent_id}...")
-    
-    api_success, _ = run_curl("POST", api_url, token, debug=args.debug)
+    api_success, _ = deploy_agent(config, token, args.agent_id, debug=args.debug)
     
     if api_success:
         print(f"Success: Agent {args.agent_id} deployed.")

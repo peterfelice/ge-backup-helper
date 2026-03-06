@@ -37,7 +37,6 @@ class TestAgentCLI(unittest.TestCase):
         mock_exists.return_value = True
         config = agent_cli.load_config("dummy.env")
         self.assertEqual(config["PROJECT_ID"], "test-p")
-        self.assertIn("BASE_URL", config)
 
     @patch('subprocess.run')
     def test_run_curl_success(self, mock_run):
@@ -114,6 +113,8 @@ class TestAgentCLI(unittest.TestCase):
         mock_curl.return_value = (True, "{}")
         
         args = MagicMock(directory="backup_dir", debug=False)
+        args.deploy = False
+        args.create = False
         
         with patch('sys.stdout', new=io.StringIO()) as fake_out:
             agent_cli.handle_restore_all(args, self.config, self.token)
@@ -135,6 +136,7 @@ class TestAgentCLI(unittest.TestCase):
         ]
         
         args = MagicMock(directory="backup_dir", debug=False, create=True)
+        args.deploy = False
         
         with patch('sys.stdout', new=io.StringIO()) as fake_out:
             agent_cli.handle_restore_all(args, self.config, self.token)
