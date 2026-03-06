@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Local Google Cloud SDK
+google-cloud-sdk/
+
+# Local backups
+backup_*/
+agent_*.json
+
+# OS Specific
+.DS_Store
